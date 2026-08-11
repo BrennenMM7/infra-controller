@@ -1,0 +1,21 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<network>
+  <name>nico-scout-test</name>
+  <forward mode="nat"/>
+  <bridge name="virbr30" stp="on" delay="0"/>
+  <domain name="scout-test.local"/>
+  <dns>
+    <host ip="172.30.0.1">
+      <hostname>host.docker.internal</hostname>
+    </host>
+  </dns>
+  <ip address="172.30.0.1" netmask="255.255.255.0">
+    <dhcp>
+      <range start="172.30.0.100" end="172.30.0.200"/>
+      <host mac="@SCOUT_TEST_MAC_ADDRESS@" name="nico-scout-test" ip="172.30.0.10"/>
+    </dhcp>
+  </ip>
+</network>

@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply Scout site customization
+After=cloud-final.service
+Wants=cloud-final.service
+ConditionKernelCommandLine=scout_customization=1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/cloud-init status --wait
+ExecStart=/usr/bin/test -e /run/scout-customization/complete
+RemainAfterExit=yes

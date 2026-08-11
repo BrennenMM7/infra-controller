@@ -30,6 +30,10 @@ nico-api:
       value: "1"
   webAuth:
     mode: none
+  certificate:
+    extraDnsNames:
+      - carbide-api.forge
+      - host.docker.internal
   siteConfig:
     enabled: true
     nicoApiSiteConfig: |
@@ -199,10 +203,41 @@ nico-machine-a-tron:
           adminDhcpRelayAddress: 192.168.176.1
 
 tilt:
-  profiles: # Toggle REST, MCP, and DSX Exchange; required dependencies follow automatically.
+  profiles: # Toggle optional stacks and test fixtures; required dependencies follow automatically.
     rest: false
     mcp: false
     dsxExchange: false
+    scoutCustomization: false
+
+  scoutCustomization:
+    siteConfig: |
+      [scout_customization]
+      systemd_units = ["nico-scout-customization-e2e.service"]
+
+      [[scout_customization.files]]
+      path = "/etc/nico/scout-customization-e2e.input"
+      permissions = "0644"
+      content = "NICO_SCOUT_CUSTOMIZATION_E2E_PASS\n"
+
+      [[scout_customization.files]]
+      path = "/etc/systemd/system/nico-scout-customization-e2e.service"
+      permissions = "0644"
+      content = '''
+      [Unit]
+      Description=Verify NICo Scout site customization
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/install -D -m 0644 /etc/nico/scout-customization-e2e.input /run/nico-scout-customization-e2e/passed
+      ExecStart=/usr/bin/grep -Fx NICO_SCOUT_CUSTOMIZATION_E2E_PASS /run/nico-scout-customization-e2e/passed
+      ExecStart=/bin/echo NICO_SCOUT_CUSTOMIZATION_E2E_PASS
+      RemainAfterExit=yes
+      StandardOutput=journal+console
+      StandardError=journal+console
+
+      [Install]
+      WantedBy=multi-user.target
+      '''
 
   certManager:
     crds:

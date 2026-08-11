@@ -5378,6 +5378,11 @@ message CloudInitInstructions {
   // alternate hostname or IP that they can resolve.
   optional string api_url_override = 4;
   optional string pxe_url_override = 5;
+  // Separate Scout payload that cannot replace tenant or BlueField user-data.
+  optional string scout_cloud_init = 6;
+  // Scout's NoCloud seed identity. Kept separate so pre-ingestion Scout
+  // requests do not change the legacy metadata response used by DPUs.
+  optional CloudInitMetaData scout_metadata = 7;
 }
 
 // Specifies whether a network interface is physical network function (PF)

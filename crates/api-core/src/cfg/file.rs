@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use bmc_vendor::BMCVendor;
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
@@ -671,6 +671,10 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub dpf: DpfConfig,
 
+    /// Site customization applied before Scout starts.
+    #[serde(default)]
+    pub scout_customization: Option<ScoutCustomizationConfig>,
+
     /// The URL to use for overriding the PXE boot url on X86 machines.
     #[serde(default)]
     pub x86_pxe_boot_url_override: Option<String>,
@@ -929,6 +933,282 @@ impl ApiAdmissionControlConfig {
         }
         Ok(())
     }
+}
+
+/// Constrained customization for the ephemeral Scout discovery OS.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScoutCustomizationConfig {
+    /// Debian package specifications such as `jq` or `teleport=17.3.2`.
+    #[serde(default)]
+    pub packages: Vec<String>,
+
+    /// Files written into Scout's writable overlay before services start.
+    #[serde(default)]
+    pub files: Vec<ScoutCustomizationFile>,
+
+    /// systemd units enabled and queued after packages and files are applied.
+    #[serde(default)]
+    pub systemd_units: Vec<String>,
+}
+
+/// A file written into Scout's ephemeral writable overlay.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScoutCustomizationFile {
+    /// Absolute destination path.
+    pub path: PathBuf,
+
+    /// File contents, redacted from configuration displays and logs.
+    pub content: String,
+
+    /// Four-digit octal file mode.
+    #[serde(default = "default_scout_file_permissions")]
+    pub permissions: String,
+}
+
+fn default_scout_file_permissions() -> String {
+    "0644".to_string()
+}
+
+#[derive(Serialize)]
+struct ScoutCloudConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package_update: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    write_files: Vec<ScoutCloudInitFile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    bootcmd: Vec<Vec<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runcmd: Vec<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct ScoutCloudInitFile {
+    path: String,
+    content: String,
+    owner: String,
+    permissions: String,
+    defer: bool,
+}
+
+const SCOUT_PACKAGE_START_POLICY_PATH: &str = "/usr/sbin/policy-rc.d";
+const SCOUT_PACKAGE_START_POLICY_BACKUP: &str = "/run/scout-customization/policy-rc.d.original";
+
+impl ScoutCustomizationConfig {
+    pub(crate) fn validate(&self) -> eyre::Result<()> {
+        for package in &self.packages {
+            if !valid_debian_package_spec(package) {
+                return Err(eyre::eyre!(
+                    "scout_customization package {package:?} is not a valid Debian package specification"
+                ));
+            }
+        }
+
+        for file in &self.files {
+            let mut components = file.path.components();
+            if components.next() != Some(Component::RootDir)
+                || components.next().is_none()
+                || file.path.components().any(|component| {
+                    !matches!(component, Component::RootDir | Component::Normal(_))
+                })
+            {
+                return Err(eyre::eyre!(
+                    "scout_customization file path {:?} must be an absolute normalized file path",
+                    file.path
+                ));
+            }
+            if file.path.starts_with("/run/scout-customization") {
+                return Err(eyre::eyre!(
+                    "scout_customization file path {:?} uses the reserved Scout completion-marker directory",
+                    file.path
+                ));
+            }
+            if file.path == Path::new(SCOUT_PACKAGE_START_POLICY_PATH) {
+                return Err(eyre::eyre!(
+                    "scout_customization file path {:?} is reserved for package-install service suppression",
+                    file.path
+                ));
+            }
+            if !valid_octal_file_mode(&file.permissions) {
+                return Err(eyre::eyre!(
+                    "scout_customization file path {:?} has invalid permissions {:?}; expected four octal digits such as \"0644\"",
+                    file.path,
+                    file.permissions
+                ));
+            }
+        }
+
+        for unit in &self.systemd_units {
+            if !valid_systemd_unit_name(unit) {
+                return Err(eyre::eyre!(
+                    "scout_customization systemd unit {unit:?} is invalid"
+                ));
+            }
+            if matches!(
+                unit.as_str(),
+                "cloud-final.service"
+                    | "forge-scout-customization.service"
+                    | "forge-scout.service"
+                    | "ssh.service"
+                    | "sshd.service"
+            ) {
+                return Err(eyre::eyre!(
+                    "scout_customization systemd unit {unit:?} is managed by the Scout boot sequence"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn render_cloud_init(&self) -> Result<String, serde_yaml::Error> {
+        let write_files = self
+            .files
+            .iter()
+            .map(|file| ScoutCloudInitFile {
+                path: file.path.to_string_lossy().into_owned(),
+                content: file.content.clone(),
+                owner: "root:root".to_string(),
+                permissions: file.permissions.clone(),
+                // Package installation happens in cloud-final. Defer site files so
+                // package payloads cannot replace them before site services start.
+                defer: true,
+            })
+            .collect::<Vec<_>>();
+
+        let mut apply_script =
+            "mkdir -p -- /run/scout-customization\nchmod 0700 /run/scout-customization\n"
+                .to_string();
+        let bootcmd = if self.packages.is_empty() {
+            Vec::new()
+        } else {
+            let suppress_package_services = format!(
+                "mkdir -p -- /run/scout-customization\n\
+                 chmod 0700 /run/scout-customization\n\
+                 if [ -e {SCOUT_PACKAGE_START_POLICY_PATH} ] || [ -L {SCOUT_PACKAGE_START_POLICY_PATH} ]; then\n\
+                   mv -- {SCOUT_PACKAGE_START_POLICY_PATH} {SCOUT_PACKAGE_START_POLICY_BACKUP}\n\
+                 fi\n\
+                 printf '%s\\n' '#!/bin/sh' 'exit 101' > {SCOUT_PACKAGE_START_POLICY_PATH}\n\
+                 chmod 0755 {SCOUT_PACKAGE_START_POLICY_PATH}\n"
+            );
+            vec![vec![
+                "/bin/sh".to_string(),
+                "-eu".to_string(),
+                "-c".to_string(),
+                suppress_package_services,
+            ]]
+        };
+        if !self.packages.is_empty() {
+            apply_script.push_str(&format!(
+                "if [ -e {SCOUT_PACKAGE_START_POLICY_BACKUP} ] || [ -L {SCOUT_PACKAGE_START_POLICY_BACKUP} ]; then\n\
+                   mv -f -- {SCOUT_PACKAGE_START_POLICY_BACKUP} {SCOUT_PACKAGE_START_POLICY_PATH}\n\
+                 else\n\
+                   rm -f -- {SCOUT_PACKAGE_START_POLICY_PATH}\n\
+                 fi\n"
+            ));
+        }
+        if !self.systemd_units.is_empty() {
+            apply_script.push_str("systemctl daemon-reload\n");
+        }
+        for unit in &self.systemd_units {
+            apply_script.push_str(&format!("systemctl enable -- {unit}\n"));
+            // Avoid deadlocking units ordered after the customization gate.
+            apply_script.push_str(&format!("systemctl start --no-block -- {unit}\n"));
+        }
+        apply_script.push_str("touch /run/scout-customization/complete\n");
+
+        let config = ScoutCloudConfig {
+            package_update: (!self.packages.is_empty()).then_some(true),
+            packages: self.packages.clone(),
+            write_files,
+            bootcmd,
+            // Fail before writing the completion marker if any command fails.
+            runcmd: vec![vec![
+                "/bin/sh".to_string(),
+                "-eu".to_string(),
+                "-c".to_string(),
+                apply_script,
+            ]],
+        };
+        serde_yaml::to_string(&config).map(|yaml| format!("#cloud-config\n{yaml}"))
+    }
+
+    fn redact_file_contents(&mut self) {
+        self.files
+            .iter_mut()
+            .for_each(|file| file.content = "redacted".to_string());
+    }
+}
+
+fn valid_debian_package_spec(package: &str) -> bool {
+    let (name_and_architecture, version) = package
+        .split_once('=')
+        .map_or((package, None), |(name, version)| (name, Some(version)));
+    let (name, architecture) = name_and_architecture
+        .split_once(':')
+        .map_or((name_and_architecture, None), |(name, architecture)| {
+            (name, Some(architecture))
+        });
+
+    let name_is_valid = name.len() >= 2
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
+        });
+    if !name_is_valid {
+        return false;
+    }
+
+    let architecture_is_valid = architecture.is_none_or(|architecture| {
+        !architecture.is_empty()
+            && architecture
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && architecture
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && architecture
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    let version_is_valid = version.is_none_or(|version| {
+        !version.is_empty()
+            && !version.starts_with('-')
+            && version.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b':' | b'~' | b'-')
+            })
+    });
+    architecture_is_valid && version_is_valid
+}
+
+fn valid_octal_file_mode(permissions: &str) -> bool {
+    permissions.len() == 4
+        && permissions.starts_with('0')
+        && permissions
+            .bytes()
+            .skip(1)
+            .all(|byte| matches!(byte, b'0'..=b'7'))
+}
+
+fn valid_systemd_unit_name(unit: &str) -> bool {
+    const VALID_SUFFIXES: [&str; 6] = [
+        ".service", ".socket", ".timer", ".path", ".mount", ".target",
+    ];
+
+    !unit.is_empty()
+        && !unit.starts_with('-')
+        && unit.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'@' | b':' | b'-')
+        })
+        && VALID_SUFFIXES.iter().any(|suffix| unit.ends_with(suffix))
 }
 
 /// `[certificates]` config section: selects the backend that vends machine and
@@ -2375,6 +2655,9 @@ impl CarbideConfig {
             && dedicated.token.is_some()
         {
             dedicated.token = Some("redacted".to_string());
+        }
+        if let Some(scout_customization) = config.scout_customization.as_mut() {
+            scout_customization.redact_file_contents();
         }
         config
     }
@@ -3907,6 +4190,208 @@ mod tests {
     }
 
     #[test]
+    fn scout_customization_validation_covers_supported_inputs() {
+        check_values(
+            vec![
+                Check {
+                    scenario: "empty configuration",
+                    input: ScoutCustomizationConfig::default(),
+                    expect: true,
+                },
+                Check {
+                    scenario: "all constrained operations",
+                    input: ScoutCustomizationConfig {
+                        packages: vec!["jq:arm64".to_string(), "teleport=17.3.2".to_string()],
+                        files: vec![ScoutCustomizationFile {
+                            path: "/etc/site-monitor/config.toml".into(),
+                            content: "enabled = true".to_string(),
+                            permissions: "0600".to_string(),
+                        }],
+                        systemd_units: vec!["site-monitor.service".to_string()],
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "APT option is not a package",
+                    input: ScoutCustomizationConfig {
+                        packages: vec!["--allow-unauthenticated".to_string()],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "package architecture cannot be empty",
+                    input: ScoutCustomizationConfig {
+                        packages: vec!["jq:".to_string()],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "package cannot contain multiple architecture separators",
+                    input: ScoutCustomizationConfig {
+                        packages: vec!["jq:arm64:extra".to_string()],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "package architecture cannot be punctuation only",
+                    input: ScoutCustomizationConfig {
+                        packages: vec!["jq:-".to_string()],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "completion marker directory is reserved",
+                    input: ScoutCustomizationConfig {
+                        files: vec![ScoutCustomizationFile {
+                            path: "/run/scout-customization/complete".into(),
+                            content: String::new(),
+                            permissions: "0644".to_string(),
+                        }],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "package service suppression path is reserved",
+                    input: ScoutCustomizationConfig {
+                        files: vec![ScoutCustomizationFile {
+                            path: SCOUT_PACKAGE_START_POLICY_PATH.into(),
+                            content: String::new(),
+                            permissions: "0755".to_string(),
+                        }],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "Scout boot unit cannot customize itself",
+                    input: ScoutCustomizationConfig {
+                        systemd_units: vec!["forge-scout-customization.service".to_string()],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "file path must be absolute",
+                    input: ScoutCustomizationConfig {
+                        files: vec![ScoutCustomizationFile {
+                            path: "etc/site-monitor/config.toml".into(),
+                            content: String::new(),
+                            permissions: "0644".to_string(),
+                        }],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "file mode must be octal",
+                    input: ScoutCustomizationConfig {
+                        files: vec![ScoutCustomizationFile {
+                            path: "/etc/site-monitor/config.toml".into(),
+                            content: String::new(),
+                            permissions: "0688".to_string(),
+                        }],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "systemd unit needs a supported suffix",
+                    input: ScoutCustomizationConfig {
+                        systemd_units: vec!["site-monitor".to_string()],
+                        ..Default::default()
+                    },
+                    expect: false,
+                },
+            ],
+            |config| config.validate().is_ok(),
+        );
+    }
+
+    #[test]
+    fn scout_customization_renders_constrained_cloud_init() {
+        let customization = ScoutCustomizationConfig {
+            packages: vec!["jq".to_string()],
+            files: vec![ScoutCustomizationFile {
+                path: "/etc/site-monitor/config.toml".into(),
+                content: "enabled = true\n".to_string(),
+                permissions: "0600".to_string(),
+            }],
+            systemd_units: vec!["site-monitor.service".to_string()],
+        };
+
+        let rendered = customization.render_cloud_init().unwrap();
+        assert!(rendered.starts_with("#cloud-config\n"));
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(rendered.trim_start_matches("#cloud-config\n")).unwrap();
+        assert_eq!(document["package_update"], true);
+        assert_eq!(document["packages"][0], "jq");
+        assert_eq!(
+            document["write_files"][0]["path"],
+            "/etc/site-monitor/config.toml"
+        );
+        assert_eq!(document["write_files"][0]["content"], "enabled = true\n");
+        assert_eq!(document["write_files"][0]["defer"], true);
+        let boot_commands = document["bootcmd"].as_sequence().unwrap();
+        assert_eq!(boot_commands.len(), 1);
+        let boot_command = boot_commands[0].as_sequence().unwrap();
+        assert_eq!(boot_command[0], "/bin/sh");
+        let boot_script = boot_command[3].as_str().unwrap();
+        assert!(boot_script.contains("exit 101"));
+        assert!(
+            boot_script.contains(
+                "mv -- /usr/sbin/policy-rc.d /run/scout-customization/policy-rc.d.original"
+            )
+        );
+        let commands = document["runcmd"].as_sequence().unwrap();
+        assert_eq!(commands.len(), 1);
+        let command = commands[0].as_sequence().unwrap();
+        assert_eq!(command[0], "/bin/sh");
+        assert_eq!(command[1], "-eu");
+        assert_eq!(command[2], "-c");
+        let apply_script = command[3].as_str().unwrap();
+        assert!(apply_script.contains("rm -f -- /usr/sbin/policy-rc.d"));
+        assert!(apply_script.contains(
+            "mv -f -- /run/scout-customization/policy-rc.d.original /usr/sbin/policy-rc.d"
+        ));
+        assert!(apply_script.contains("systemctl daemon-reload\n"));
+        assert!(apply_script.contains("systemctl enable -- site-monitor.service\n"));
+        assert!(apply_script.contains("systemctl start --no-block -- site-monitor.service\n"));
+        assert_eq!(
+            apply_script.lines().last(),
+            Some("touch /run/scout-customization/complete")
+        );
+    }
+
+    #[test]
+    fn deserialize_scout_customization() {
+        let config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .merge(Toml::string(
+                r#"
+                    [scout_customization]
+                    packages = ["jq"]
+                    systemd_units = ["site-monitor.service"]
+
+                    [[scout_customization.files]]
+                    path = "/etc/site-monitor/config.toml"
+                    content = "enabled = true"
+                "#,
+            ))
+            .extract()
+            .unwrap();
+
+        let customization = config.scout_customization.unwrap();
+        assert_eq!(customization.packages, ["jq"]);
+        assert_eq!(customization.files[0].permissions, "0644");
+        assert!(customization.validate().is_ok());
+    }
+
+    #[test]
     fn deny_prefixes_accept_both_address_families() {
         let config: CarbideConfig = Figment::new()
             .merge(Toml::string(
@@ -4485,6 +4970,20 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.token.as_deref()),
             Some("redacted")
+        );
+
+        config.scout_customization = Some(ScoutCustomizationConfig {
+            files: vec![ScoutCustomizationFile {
+                path: "/etc/site-monitor/token".into(),
+                content: "secret-value".to_string(),
+                permissions: "0600".to_string(),
+            }],
+            ..Default::default()
+        });
+        let redacted = config.redacted();
+        assert_eq!(
+            redacted.scout_customization.unwrap().files[0].content,
+            "redacted"
         );
     }
 

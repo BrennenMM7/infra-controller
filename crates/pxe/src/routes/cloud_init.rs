@@ -21,7 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum_template::TemplateEngine;
 use base64::Engine as _;
@@ -33,7 +34,10 @@ use rpc::forge;
 use rpc::forge::PxeDomain;
 
 use crate::common::{AppState, Machine};
-use crate::metrics::{BootEndpoint, OutcomeReason, PxeBootOutcome, PxeCloudInitRequestFailed};
+use crate::metrics::{
+    BootEndpoint, OutcomeReason, PxeBootOutcome, PxeCloudInitRequestFailed,
+    PxeScoutCloudInitUnavailable,
+};
 
 const DEFAULT_NUM_OF_VFS: u32 = 16;
 const DEFAULT_HBN_BRIDGE: &str = "br-hbn";
@@ -246,12 +250,43 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
     axum_template::Render(template_key, state.engine.clone(), template_data)
 }
 
-async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoResponse {
-    let (template_key, template_data) = match machine.instructions.metadata {
-        None => log_and_generate_generic_error(
-            format!("No metadata was found for machine {machine:?}"),
-            OutcomeReason::MetadataNotFound,
-        ),
+const EMPTY_SCOUT_CLOUD_CONFIG: &str = "#cloud-config\n{}\n";
+
+/// Serves Scout user-data without the legacy BlueField fallback.
+async fn scout_user_data(machine: Machine, state: State<AppState>) -> Response {
+    let Some(user_data) = machine.instructions.scout_cloud_init else {
+        emit(PxeScoutCloudInitUnavailable {
+            endpoint: BootEndpoint::CloudInit,
+            reason: OutcomeReason::InstructionsEmpty,
+            error: "Scout requested required customization but the API returned no payload"
+                .to_string(),
+        });
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Scout customization is unavailable\n",
+        )
+            .into_response();
+    };
+
+    emit(PxeBootOutcome {
+        endpoint: BootEndpoint::CloudInit,
+        reason: OutcomeReason::Ok,
+    });
+    axum_template::Render(
+        "user-data-assigned",
+        state.engine.clone(),
+        HashMap::from([("user_data".to_string(), user_data)]),
+    )
+    .into_response()
+}
+
+fn metadata_response(
+    metadata: Option<forge::CloudInitMetaData>,
+    state: State<AppState>,
+    missing_error: String,
+) -> Response {
+    let (template_key, template_data) = match metadata {
+        None => log_and_generate_generic_error(missing_error, OutcomeReason::MetadataNotFound),
         Some(metadata) => {
             let template_data = HashMap::from([
                 ("instance_id".to_string(), metadata.instance_id),
@@ -267,7 +302,20 @@ async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
         }
     };
 
-    axum_template::Render(template_key, state.engine.clone(), template_data)
+    axum_template::Render(template_key, state.engine.clone(), template_data).into_response()
+}
+
+async fn meta_data(machine: Machine, state: State<AppState>) -> Response {
+    let missing_error = format!("No metadata was found for machine {machine:?}");
+    metadata_response(machine.instructions.metadata, state, missing_error)
+}
+
+async fn scout_meta_data(machine: Machine, state: State<AppState>) -> Response {
+    metadata_response(
+        machine.instructions.scout_metadata,
+        state,
+        "No Scout cloud-init metadata was found".to_string(),
+    )
 }
 
 /// Extracts the top-level `network:` key (if present) from a tenant's
@@ -337,6 +385,31 @@ async fn vendor_data(state: State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// Returns empty network data because Scout uses systemd-networkd.
+async fn scout_network_config(state: State<AppState>) -> impl IntoResponse {
+    axum_template::Render(
+        "network-config",
+        state.engine.clone(),
+        HashMap::from([("network_config", "{}\n")]),
+    )
+}
+
+/// Returns empty vendor-data so customization is not applied twice.
+async fn scout_vendor_data(state: State<AppState>) -> impl IntoResponse {
+    emit(PxeBootOutcome {
+        endpoint: BootEndpoint::CloudInit,
+        reason: OutcomeReason::Ok,
+    });
+    axum_template::Render(
+        "user-data-assigned",
+        state.engine.clone(),
+        HashMap::from([(
+            "user_data".to_string(),
+            EMPTY_SCOUT_CLOUD_CONFIG.to_string(),
+        )]),
+    )
+}
+
 /// Builds the PXE service's route table for the cloud-init-related
 /// endpoints served under `path_prefix`: `user-data`, `meta-data`,
 /// `vendor-data`, and `network-config`.
@@ -360,10 +433,33 @@ pub(crate) fn get_router(path_prefix: &str) -> Router<AppState> {
         )
 }
 
+/// Builds Scout's isolated NoCloud routes.
+pub(crate) fn get_scout_router(path_prefix: &str) -> Router<AppState> {
+    Router::new()
+        .route(
+            format!("{}/{}", path_prefix, "user-data").as_str(),
+            get(scout_user_data),
+        )
+        .route(
+            format!("{}/{}", path_prefix, "meta-data").as_str(),
+            get(scout_meta_data),
+        )
+        .route(
+            format!("{}/{}", path_prefix, "vendor-data").as_str(),
+            get(scout_vendor_data),
+        )
+        .route(
+            format!("{}/{}", path_prefix, "network-config").as_str(),
+            get(scout_network_config),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse as _;
     use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::{Check, check_values};
 
@@ -912,5 +1008,92 @@ mod tests {
             ),
             1.0,
         );
+    }
+
+    async fn render_scout_user_data(scout_cloud_init: Option<&str>) -> (StatusCode, String) {
+        let template_glob = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pxe/templates/**/*");
+        let mut state = test_app_state();
+        state.engine = axum_template::engine::Engine::from(tera::Tera::new(template_glob).unwrap());
+        let response = scout_user_data(
+            Machine {
+                instructions: forge::CloudInitInstructions {
+                    scout_cloud_init: scout_cloud_init.map(str::to_string),
+                    ..Default::default()
+                },
+            },
+            State(state),
+        )
+        .await
+        .into_response();
+        let status = response.status();
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        (status, body)
+    }
+
+    async fn render_scout_meta_data(
+        scout_metadata: Option<forge::CloudInitMetaData>,
+    ) -> (StatusCode, String) {
+        let template_glob = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pxe/templates/**/*");
+        let mut state = test_app_state();
+        state.engine = axum_template::engine::Engine::from(tera::Tera::new(template_glob).unwrap());
+        let response = scout_meta_data(
+            Machine {
+                instructions: forge::CloudInitInstructions {
+                    scout_metadata,
+                    ..Default::default()
+                },
+            },
+            State(state),
+        )
+        .await;
+        let status = response.status();
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn scout_user_data_isolated_from_dpu_template_and_fails_closed() {
+        let (status, configured) =
+            render_scout_user_data(Some("#cloud-config\npackages: [jq]\n")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(configured.trim_end(), "#cloud-config\npackages: [jq]");
+
+        let metrics = MetricsCapture::start();
+        let (status, missing) = render_scout_user_data(None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!missing.contains("bfb"));
+        assert!(!missing.contains("#!/bin/bash"));
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_pxe_boot_outcomes_total",
+                &[("endpoint", "cloud_init"), ("reason", "instructions_empty"),],
+            ),
+            1.0,
+        );
+    }
+
+    #[tokio::test]
+    async fn scout_metadata_is_isolated_from_legacy_metadata() {
+        let (status, body) = render_scout_meta_data(Some(forge::CloudInitMetaData {
+            instance_id: "interface-id".to_string(),
+            cloud_name: "nvidia".to_string(),
+            platform: "forge".to_string(),
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("instance-id: interface-id"));
     }
 }

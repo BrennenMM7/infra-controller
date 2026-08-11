@@ -99,6 +99,7 @@ applicable.
 | `bgp_leaf_session_password` | `Option<BgpLeafSessionPassword>` | — | `networking` | Selects the credential source for leaf-facing BGP session passwords returned to agents in managed host network config. Supported value: `site_wide`. |
 | `site_global_vpc_vni` | `Option<u32>` | — | `networking` | Forces all VRFs to share a single VNI (Cumulus Linux route-leaking workaround). Limits DPU to one VRF. |
 | `dpf` | `DpfConfig` | *(see below)* | `machines` | DPF (DPU Platform Framework) Kubernetes deployment (see [DpfConfig](#dpfconfig)). |
+| `scout_customization` | `Option<ScoutCustomizationConfig>` | — | `machines` | Site-owned packages, files, and systemd units applied to the ephemeral Scout discovery OS before Scout and SSH start (see [ScoutCustomizationConfig](#scoutcustomizationconfig)). |
 | `x86_pxe_boot_url_override` | `Option<String>` | — | `machines` | Override PXE boot URL for x86 machines. |
 | `arm_pxe_boot_url_override` | `Option<String>` | — | `machines` | Override PXE boot URL for ARM machines. |
 | `pxe_public_base_url` | `String` | `http://carbide-pxe.forge:8080` | `machines` | Canonical PXE base URL. |
@@ -123,6 +124,81 @@ applicable.
 | `dhcp_lease_expiry_handling` | `bool` | `false` | `networking` | Enables IP cleanup when a DHCP lease expires. |
 | `certificates` | `CertificatesConfig` | *(default)* | `security` | Certificate vending backend, selected independently of the credential store; the default shares the credential Vault (see [CertificatesConfig](#certificatesconfig)). |
 | `allow_insecure_discovery` | `bool` | `false` | `machines` | Allows machines to submit discovery without enforcing the request comes from the expected IP address. Needed for *Integration tests only*, should otherwise not be used. |
+
+---
+
+## `ScoutCustomizationConfig`
+
+The optional `[scout_customization]` section is rendered as a constrained
+cloud-init document and applied to Scout's in-memory writable overlay on every
+discovery boot. It does not alter tenant user-data or DPU BFB provisioning.
+When the section is absent, Scout boots with `cloud-init=disabled` and retains
+the existing startup workflow. A present but empty section enables NoCloud and
+runs the customization gate without installing packages or writing site files.
+
+NICo reads this section at API startup. Changing it requires restarting
+`nico-api`; the new payload is applied the next time a host network-boots Scout.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `packages` | `Vec<String>` | `[]` | Debian package specifications installed from Scout's configured APT repositories in `name[:architecture][=version]` form. APT options are rejected. Debian maintainer-script service starts are suppressed during installation. |
+| `files` | `Vec<ScoutCustomizationFile>` | `[]` | Absolute, normalized files written as `root:root` into Scout's ephemeral writable overlay after packages are installed. Modes are four octal digits and default to `0644`. Inline contents are redacted from the configuration display. |
+| `systemd_units` | `Vec<String>` | `[]` | `.service`, `.socket`, `.timer`, `.path`, `.mount`, or `.target` units enabled and queued after package and file operations complete. Queueing does not wait for service readiness. Scout's own boot units are rejected. |
+
+Package names are at least two characters, start with a lowercase ASCII letter
+or digit, and contain only lowercase ASCII letters, digits, `+`, `.`, and `-`.
+An architecture is nonempty, starts and ends with a lowercase ASCII letter or
+digit, and otherwise contains lowercase ASCII letters, digits, and `-`. A
+version is nonempty, does not start with `-`, and contains ASCII alphanumerics,
+`+`, `.`, `:`, `~`, and `-`.
+
+Unit names cannot start with `-` and contain only ASCII alphanumerics, `_`,
+`.`, `@`, `:`, and `-`. The units `cloud-final.service`,
+`forge-scout-customization.service`, `forge-scout.service`, `ssh.service`, and
+`sshd.service` are managed by the Scout boot sequence and are rejected.
+
+Each `files` entry has the following fields:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `path` | `PathBuf` | Yes | — | Absolute, normalized destination file path. |
+| `content` | `String` | Yes | — | Complete file contents. Redacted from the configuration display, but still delivered in the NoCloud response. |
+| `permissions` | `String` | No | `0644` | Exactly four octal digits beginning with `0`. |
+
+File paths under `/run/scout-customization` and the package-start policy path
+`/usr/sbin/policy-rc.d` are reserved for the boot gate and are rejected during
+NICo startup validation.
+
+Example:
+
+```toml
+[scout_customization]
+packages = ["site-monitor"]
+systemd_units = ["site-monitor.service"]
+
+[[scout_customization.files]]
+path = "/etc/site-monitor/config.toml"
+permissions = "0600"
+content = """
+endpoint = "https://monitor.example.com"
+"""
+```
+
+During package installation, NICo installs a per-boot Debian `policy-rc.d`
+rule so compliant package maintainer scripts cannot start daemons before
+deferred site files exist. Any pre-existing rule is restored before configured
+units are queued. A package, file, or unit command failure leaves the completion
+marker absent, so Scout and SSH remain stopped instead of running partially
+customized.
+
+Scout customization is privileged. Publish site packages through an
+architecture-aware, signed APT repository and use authenticated transport for
+the NoCloud seed. The default development PXE/Forge APT HTTP paths are not an
+integrity boundary and are not suitable for untrusted networks. Do not place
+passwords, long-lived tokens, or private keys in `files`; replacement discovery
+OS authentication is tracked separately in
+[NVIDIA/infra-controller#4025](https://github.com/NVIDIA/infra-controller/issues/4025).
+This feature does not change the existing Scout or Scout Loader login behavior.
 
 ---
 

@@ -125,6 +125,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // we'd have to see if it's actually worthwhile in a real load test scenario
         .merge(routes::ipxe::get_router("/api/v0/pxe"))
         .merge(routes::cloud_init::get_router("/api/v0/cloud-init"))
+        .merge(routes::cloud_init::get_scout_router(
+            "/api/v0/cloud-init/scout",
+        ))
         .merge(routes::tls::get_router("/api/v0/tls"))
         .route_layer(axum::middleware::from_fn(middleware::logging::logger))
         .layer(map_response(middleware::fix_content_length_header))

@@ -177,6 +177,14 @@ dependencies = [
   "setup-apt-repo-amd64",
 ]
 
+[tasks.build-scout-artifacts-x86-host-sa]
+description = "Build only the x86_64 Scout loader and root filesystem for local integration tests"
+dependencies = [
+  "mkdir-static",
+  { name = "package-scout-x86_64-release-local", path = "${REPO_ROOT}" },
+  "create-scout-image-x86-host",
+]
+
 [tasks.build-boot-artifacts-x86-host-ci]
 dependencies = [
   "mkdir-static",
@@ -304,6 +312,27 @@ dependencies = [
   "mkosi-copy-scout-to-webroot-x86_64",
   "mkosi-copy-scout-loader-to-webroot-x86_64",
   "mkosi-clean-qcow-imager",
+  "mkosi-clean-scout-x86_64",
+  "mkosi-clean-scout-loader-x86_64",
+]
+
+[tasks.create-scout-image-x86-host]
+category = "Ephemeral Image"
+description = "Build only the x86_64 Scout loader and root filesystem"
+dependencies = [
+  "mkosi-remove-zypper-from-debian-tools",
+  "mkdir-static",
+  "mkosi-generate-build-tmpdir",
+  "copy-forge-scout-x86_64",
+  "copy-forge-dev-root-ca-x86_64",
+  "stage-disk_imaging-script",
+  "stage-scout-loader-rclocal",
+  "stage-scout-update-check",
+  "stage-scout-module-loader",
+  "mkosi-build-scout-x86_64",
+  "mkosi-build-scout-loader-x86_64",
+  "mkosi-copy-scout-to-webroot-x86_64",
+  "mkosi-copy-scout-loader-to-webroot-x86_64",
   "mkosi-clean-scout-x86_64",
   "mkosi-clean-scout-loader-x86_64",
 ]

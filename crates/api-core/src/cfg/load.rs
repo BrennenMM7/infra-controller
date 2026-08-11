@@ -154,6 +154,10 @@ pub fn parse_carbide_config(
     config.validate_web_ui_sidebar_tools()?;
     config.api_admission_control.validate()?;
 
+    if let Some(scout_customization) = &config.scout_customization {
+        scout_customization.validate()?;
+    }
+
     if let Some(config) = &config.dsx_exchange_event_bus {
         config.periodic_state_republish.validate()?;
     }

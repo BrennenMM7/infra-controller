@@ -74,6 +74,7 @@ pub fn fully_populated() -> CarbideConfig {
             use_vpc_vrf_loopback: false,
         }),
         dsx_exchange_event_bus: Some(DsxExchangeEventBusConfig::default()),
+        scout_customization: Some(Default::default()),
         secrets: Some(SecretsConfig {
             kms: KmsConfig {
                 active: "local".to_string(),
@@ -279,6 +280,7 @@ pub fn get() -> CarbideConfig {
         },
         dsx_exchange_event_bus: None,
         dpf: crate::cfg::file::DpfConfig::default(),
+        scout_customization: None,
         x86_pxe_boot_url_override: None,
         arm_pxe_boot_url_override: None,
         pxe_public_base_url: default_pxe_public_base_url(),

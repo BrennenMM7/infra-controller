@@ -47,6 +47,7 @@ pub(crate) struct PxeInstructionsInput {
     pub(crate) interface_id: MachineInterfaceId,
     pub(crate) arch: rpc::MachineArchitecture,
     pub(crate) product: Option<String>,
+    pub(crate) scout_customization_enabled: bool,
 }
 
 impl TryFrom<rpc::PxeInstructionRequest> for PxeInstructionRequest {
@@ -198,6 +199,7 @@ impl PxeInstructions {
         mac_address: MacAddress,
         console: &str,
         machine_type: MachineType,
+        scout_customization_enabled: bool,
     ) -> String {
         tracing::info!(
             machine_type = %machine_type,
@@ -205,12 +207,17 @@ impl PxeInstructions {
             mac_address = %mac_address,
             "machine network boot parameters",
         );
+        let scout_cloud_init = if scout_customization_enabled {
+            " ds=nocloud-net;s=${cloudinit-url}scout/ network-config=disabled scout_customization=1"
+        } else {
+            " cloud-init=disabled"
+        };
         match arch {
             rpc::MachineArchitecture::Arm => {
                 if machine_type == MachineType::Host || machine_type == MachineType::PredictedHost {
                     InstructionGenerator {
                         kernel: "${base-url}/internal/aarch64/scout.efi".to_string(),
-                        command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url]"),
+                        command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url]{scout_cloud_init}"),
                         initrd: None,
                     }
                 }
@@ -226,7 +233,7 @@ impl PxeInstructions {
             rpc::MachineArchitecture::X86 => {
                 InstructionGenerator {
                     kernel: "${base-url}/internal/x86_64/scout.efi".to_string(),
-                    command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url]"),
+                    command_line: format!("mac={mac_address} console=tty0 console={console},115200 pci=realloc=off iommu=off cli_cmd=auto-detect machine_id={machine_interface_id} server_uri=[api_url] pxe_uri=[pxe_url]{scout_cloud_init}"),
                     initrd: None,
                 }
             }
@@ -342,6 +349,7 @@ exit ||
                         interface.mac_address,
                         console,
                         MachineType::Dpu,
+                        target.scout_customization_enabled,
                     ));
                 } else {
                     tracing::warn!(
@@ -386,6 +394,7 @@ exit ||
                 interface.mac_address,
                 console,
                 machine_type,
+                target.scout_customization_enabled,
             ));
         };
 
@@ -418,6 +427,7 @@ exit ||
                     interface.mac_address,
                     console,
                     machine.id.machine_type(),
+                    target.scout_customization_enabled,
                 ));
             }
 
@@ -435,6 +445,7 @@ exit ||
                                 interface.mac_address,
                                 console,
                                 machine.id.machine_type(),
+                                target.scout_customization_enabled,
                             ));
                         }
                         _ => {
@@ -507,6 +518,7 @@ exit ||
                 interface.mac_address,
                 console,
                 machine.id.machine_type(),
+                target.scout_customization_enabled,
             ),
             ManagedHostState::Assigned { instance_state } => match instance_state {
                 InstanceState::Ready => {
@@ -619,6 +631,7 @@ exit ||
                         interface.mac_address,
                         console,
                         machine.id.machine_type(),
+                        target.scout_customization_enabled,
                     )
                 }
 
@@ -633,6 +646,7 @@ exit ||
                 interface.mac_address,
                 console,
                 machine.id.machine_type(),
+                target.scout_customization_enabled,
             ),
             x => error_instructions(machine_id, target.interface_id, x),
         };
@@ -643,7 +657,78 @@ exit ||
 
 #[cfg(test)]
 mod tests {
+    use ::rpc::forge as rpc;
+    use carbide_test_support::{Check, check_values};
+    use carbide_uuid::machine::{MachineInterfaceId, MachineType};
     use mac_address::MacAddress;
+
+    use super::PxeInstructions;
+
+    #[derive(Debug)]
+    struct ScoutBootCase {
+        architecture: rpc::MachineArchitecture,
+        machine_type: MachineType,
+        customization_enabled: bool,
+    }
+
+    #[test]
+    fn scout_cloud_init_is_only_added_to_customized_host_boots() {
+        check_values(
+            vec![
+                Check {
+                    scenario: "customized x86 host",
+                    input: ScoutBootCase {
+                        architecture: rpc::MachineArchitecture::X86,
+                        machine_type: MachineType::Host,
+                        customization_enabled: true,
+                    },
+                    expect: (true, false, false),
+                },
+                Check {
+                    scenario: "customized ARM host",
+                    input: ScoutBootCase {
+                        architecture: rpc::MachineArchitecture::Arm,
+                        machine_type: MachineType::PredictedHost,
+                        customization_enabled: true,
+                    },
+                    expect: (true, false, false),
+                },
+                Check {
+                    scenario: "unconfigured host disables cloud-init",
+                    input: ScoutBootCase {
+                        architecture: rpc::MachineArchitecture::X86,
+                        machine_type: MachineType::Host,
+                        customization_enabled: false,
+                    },
+                    expect: (false, false, true),
+                },
+                Check {
+                    scenario: "DPU keeps its BFB kickstart",
+                    input: ScoutBootCase {
+                        architecture: rpc::MachineArchitecture::Arm,
+                        machine_type: MachineType::Dpu,
+                        customization_enabled: true,
+                    },
+                    expect: (false, true, false),
+                },
+            ],
+            |case| {
+                let script = PxeInstructions::get_pxe_instruction_for_arch(
+                    case.architecture,
+                    MachineInterfaceId::from(uuid::Uuid::nil()),
+                    "aa:bb:cc:dd:ee:ff".parse().unwrap(),
+                    "ttyS0",
+                    case.machine_type,
+                    case.customization_enabled,
+                );
+                (
+                    script.contains("ds=nocloud-net;s=${cloudinit-url}scout/"),
+                    script.contains("bfks=${cloudinit-url}/user-data"),
+                    script.contains("cloud-init=disabled"),
+                )
+            },
+        );
+    }
 
     #[test]
     /// test_formatted_mac_for_instruction_generator makes sure the MAC address

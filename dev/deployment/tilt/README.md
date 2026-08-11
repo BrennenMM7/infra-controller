@@ -71,9 +71,10 @@ rebuilds.
 ## Optional profiles
 
 The `tilt.profiles` switches in [`values.yaml`](values.yaml) control REST, MCP,
-and DSX Exchange. REST brings Temporal and Keycloak, MCP automatically brings
-REST, and DSX Exchange brings NATS. The committed defaults enable REST and MCP
-and disable DSX Exchange.
+DSX Exchange, and the custom Scout image test fixture. REST brings Temporal and
+Keycloak, MCP automatically brings REST, DSX Exchange brings NATS, and the
+Scout fixture adds a deterministic site customization. The committed defaults
+disable each optional profile.
 
 Changes to `values.yaml` reload the running Tilt session. For temporary
 overrides, use `tilt args`. Start only Core with:
@@ -93,6 +94,15 @@ Add DSX Exchange with:
 ```bash
 tilt args -- --dsx-exchange=true
 ```
+
+Enable the custom Scout image fixture with:
+
+```bash
+tilt args -- --rest=false --mcp=false --scout-customization=true
+```
+
+The fixture is consumed by the public QEMU/bmc-mock workflow in
+[`../../scout-customization/README.md`](../../scout-customization/README.md).
 
 Return to the values-file defaults with:
 

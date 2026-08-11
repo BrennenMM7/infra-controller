@@ -1,0 +1,45 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<domain type="@DOMAIN_TYPE@">
+  <name>nico-scout-test</name>
+  <memory unit="MiB">4096</memory>
+  <currentMemory unit="MiB">4096</currentMemory>
+  <vcpu placement="static">4</vcpu>
+  <os>
+    <type arch="x86_64" machine="pc">hvm</type>
+    <kernel>/var/lib/nico-scout-test/scout-loader-kernel</kernel>
+    <initrd>/var/lib/nico-scout-test/scout-loader-initrd</initrd>
+    <cmdline>console=ttyS0,115200 console=tty0 systemd.log_level=info ip=dhcp mac=@SCOUT_TEST_MAC_ADDRESS@ pci=realloc=off iommu=off cli_cmd=auto-detect machine_id=@SCOUT_TEST_INTERFACE_ID@ server_uri=https://host.docker.internal:1079 pxe_uri=http://172.30.0.1:18080 newrootfs=http://172.30.0.1:18080/public/blobs/internal/x86_64/scout.squashfs ds=nocloud-net;s=http://172.30.0.1:18080/api/v0/cloud-init/scout/ network-config=disabled scout_customization=1</cmdline>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <clock offset="utc"/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <interface type="network">
+      <mac address="@SCOUT_TEST_MAC_ADDRESS@"/>
+      <source network="nico-scout-test"/>
+      <model type="virtio"/>
+    </interface>
+    <serial type="file">
+      <source path="/var/log/nico-scout-test/serial.log"/>
+      <target port="0"/>
+    </serial>
+    <console type="file">
+      <source path="/var/log/nico-scout-test/serial.log"/>
+      <target type="serial" port="0"/>
+    </console>
+    <input type="mouse" bus="ps2"/>
+    <input type="keyboard" bus="ps2"/>
+    <tpm model="tpm-tis">
+      <backend type="emulator" version="2.0"/>
+    </tpm>
+  </devices>
+</domain>

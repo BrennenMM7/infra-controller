@@ -116,3 +116,6 @@ do
     exit 1
   fi
 done
+
+# Clear build state so NoCloud runs in Scout's fresh in-memory root.
+cloud-init clean --logs

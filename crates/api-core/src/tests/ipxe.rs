@@ -35,6 +35,7 @@ use model::test_support::ManagedHostConfig;
 use rpc::forge::CloudInitInstructionsRequest;
 use rpc::forge::forge_server::Forge;
 
+use crate::cfg::file::ScoutCustomizationConfig;
 use crate::test_support::fixture_config::FixtureDefault as _;
 use crate::test_support::mac_address_pool::DPU_OOB_MAC_ADDRESS_POOL;
 use crate::tests::common;
@@ -294,7 +295,9 @@ async fn test_pxe_when_dpu_is_not_ingested(pool: sqlx::PgPool) -> eyre::Result<(
 
 #[crate::sqlx_test]
 async fn test_pxe_host(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
+    let mut config = get_config();
+    config.scout_customization = Some(ScoutCustomizationConfig::default());
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let (host_id, _dpu_id) = common::api_fixtures::create_managed_host(&env).await.into();
     let mut txn = env
         .pool
@@ -323,6 +326,11 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     )
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+    assert!(
+        instructions
+            .pxe_script
+            .contains("ds=nocloud-net;s=${cloudinit-url}scout/")
+    );
 
     move_machine_to_needed_state(
         host_id,
@@ -343,6 +351,11 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     )
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+    assert!(
+        instructions
+            .pxe_script
+            .contains("ds=nocloud-net;s=${cloudinit-url}scout/")
+    );
 
     move_machine_to_needed_state(
         host_id,
@@ -393,6 +406,11 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     )
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+    assert!(
+        instructions
+            .pxe_script
+            .contains("ds=nocloud-net;s=${cloudinit-url}scout/")
+    );
 
     move_machine_to_needed_state(
         host_id,
@@ -412,6 +430,11 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     )
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+    assert!(
+        instructions
+            .pxe_script
+            .contains("ds=nocloud-net;s=${cloudinit-url}scout/")
+    );
 }
 
 #[crate::sqlx_test]
@@ -442,7 +465,12 @@ async fn test_pxe_instance(pool: sqlx::PgPool) {
 
 #[crate::sqlx_test]
 async fn test_cloud_init_when_machine_is_not_created(pool: sqlx::PgPool) {
-    let env = common::api_fixtures::create_test_env(pool).await;
+    let mut config = get_config();
+    config.scout_customization = Some(ScoutCustomizationConfig {
+        packages: vec!["jq".to_string()],
+        ..Default::default()
+    });
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
 
     let mac_address = "FF:FF:FF:FF:FF:FF".to_string();
     let _ = env
@@ -473,6 +501,18 @@ async fn test_cloud_init_when_machine_is_not_created(pool: sqlx::PgPool) {
         .into_inner();
 
     assert!(cloud_init_cfg.discovery_instructions.is_some());
+    assert!(cloud_init_cfg.custom_cloud_init.is_none());
+    assert!(
+        cloud_init_cfg
+            .scout_cloud_init
+            .as_deref()
+            .is_some_and(|user_data| user_data.contains("- jq"))
+    );
+    assert!(cloud_init_cfg.metadata.is_none());
+    assert_eq!(
+        cloud_init_cfg.scout_metadata.unwrap().instance_id,
+        interfaces[0].id.to_string()
+    );
 }
 
 /// Verifies cloud-init discovery instructions carry configured DPU provisioning values.

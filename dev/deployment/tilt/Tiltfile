@@ -23,10 +23,15 @@ profiles = tilt_values['profiles']
 config.define_bool('rest')
 config.define_bool('mcp')
 config.define_bool('dsx-exchange')
+config.define_bool('scout-customization')
 options = config.parse()
 enable_mcp = options.get('mcp', profiles['mcp'])
 enable_rest = options.get('rest', profiles['rest']) or enable_mcp
 enable_dsx_exchange = options.get('dsx-exchange', profiles['dsxExchange'])
+enable_scout_customization = options.get(
+    'scout-customization',
+    profiles['scoutCustomization'],
+)
 local_config = tilt_values['localConfig']
 core_namespace = local_config['coreNamespace']
 rest_namespace = local_config['restNamespace']
@@ -703,6 +708,14 @@ rest_image(
 core_global = all_values['global']
 nico_api_values = component_values(core_global, all_values['nico-api'])
 nico_api_dependencies = ['nico-local-config', 'nico-postgres', 'vault']
+
+if enable_scout_customization:
+    site_config = nico_api_values['siteConfig']['nicoApiSiteConfig']
+    scout_site_config = tilt_values['scoutCustomization']['siteConfig']
+    nico_api_values['siteConfig']['nicoApiSiteConfig'] = '%s\n%s' % (
+        site_config.rstrip(),
+        scout_site_config.lstrip(),
+    )
 
 if enable_dsx_exchange:
     helm_repo(

@@ -1,8 +1,9 @@
 
 [Unit]
 Description=Scout Service
-After=network-online.target
+After=network-online.target forge-scout-customization.service
 Wants=network-online.target
+Requires=forge-scout-customization.service
 
 [Service]
 EnvironmentFile=-/opt/forge/forge-scout.env

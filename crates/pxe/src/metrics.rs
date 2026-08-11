@@ -66,7 +66,7 @@ pub(crate) fn setup_prometheus() -> PrometheusHandle {
 
 /// The boot-path endpoint an outcome describes, as a bounded metric label:
 /// the two iPXE script routes plus the cloud-init route family
-/// (user-data, meta-data, vendor-data).
+/// (user-data, meta-data, vendor-data, network-config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 pub(crate) enum BootEndpoint {
     Whoami,
@@ -74,10 +74,12 @@ pub(crate) enum BootEndpoint {
     CloudInit,
 }
 
-/// How a boot-path request resolved, as a bounded metric label. Every
-/// non-`Ok` variant is a response the machine receives as an error script
-/// or generic error template over HTTP 200 -- this label is what makes
-/// those outcomes visible, since the status-code metrics cannot see them.
+/// How a boot-path request resolved, as a bounded metric label. Most
+/// non-`Ok` variants are responses the machine receives as an error script
+/// or generic error template over HTTP 200 -- this label is what makes those
+/// outcomes visible when the status-code metrics cannot see them. A missing
+/// required Scout payload uses `InstructionsEmpty` with HTTP 503 and is also
+/// visible in the status-code metrics.
 /// Requests rejected before a handler runs (a malformed `buildarch`, an
 /// upstream failure inside the `Machine` extractor) return real 4xx codes
 /// the `http_*` metrics already count; only `architecture_not_found` is
@@ -127,7 +129,7 @@ pub(crate) struct PxeBootOutcome {
     pub(super) reason: OutcomeReason,
 }
 
-// Both failure Events write the same counter as `PxeBootOutcome`. Keep the
+// The failure Events write the same counter as `PxeBootOutcome`. Keep the
 // metric kind, description, and label keys identical so OpenTelemetry sees
 // one instrument while each route keeps its existing message.
 
@@ -147,6 +149,24 @@ pub(crate) struct PxeCloudInitRequestFailed {
     pub(super) reason: OutcomeReason,
     #[context]
     pub(super) error: String,
+}
+
+/// Records a required Scout payload that could not be served. Unlike the
+/// legacy cloud-init fallback event, this path fails closed with HTTP 503.
+#[derive(Event)]
+#[event(
+    event_name = "pxe_scout_cloud_init_unavailable",
+    metric_family = PxeBootOutcomes,
+    log = error,
+    message = "Scout cloud-init payload is unavailable"
+)]
+pub(crate) struct PxeScoutCloudInitUnavailable {
+    #[label]
+    pub endpoint: BootEndpoint,
+    #[label]
+    pub reason: OutcomeReason,
+    #[context]
+    pub error: String,
 }
 
 /// `PxeCustomIpxeFetchFailed` records a custom iPXE lookup that fell back to

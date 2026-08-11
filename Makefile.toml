@@ -218,19 +218,20 @@ description = "Build the PXE artifact build container image (Ubuntu 24.04 + Rust
 workspace = false
 script = '''
 set -e
-docker build -f ${REPO_ROOT}/dev/docker/Dockerfile.pxe-build-container -t carbide-pxe-builder ${REPO_ROOT}/dev/docker
+docker build --platform linux/amd64 -f ${REPO_ROOT}/dev/docker/Dockerfile.pxe-build-container -t carbide-pxe-builder ${REPO_ROOT}/dev/docker
 echo "Image carbide-pxe-builder built. Run: cargo make pxe-docker-x86"
 '''
 
 [tasks.pxe-docker-x86]
 category = "Build"
-description = "Build x86_64 PXE boot artifacts inside a privileged container. Requires build-pxe-build-container first. Artifacts land in pxe/static/blobs/internal/x86_64/ via the repo mount."
+description = "Build x86_64 PXE boot artifacts inside a privileged amd64 container. Requires build-pxe-build-container first. Artifacts land in pxe/static/blobs/internal/x86_64/ via the repo mount."
 workspace = false
 script = '''
 set -e
-if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
+PXE_CARGO_HOME="${PXE_DOCKER_CARGO_HOME:-${CARGO_HOME:-$HOME/.cargo}}"
+PXE_BUILD_TASK="${PXE_DOCKER_TASK:-build-boot-artifacts-x86-host-sa}"
 SCCACHE_HOST="${SCCACHE_DIR:-$HOME/.sccache}"
-mkdir -p "$SCCACHE_HOST"
+mkdir -p "$PXE_CARGO_HOME" "$SCCACHE_HOST"
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
 if [ -n "$VERSION" ]; then
@@ -243,21 +244,30 @@ else
   esac
 fi
 docker run --rm \
+  --platform linux/amd64 \
   --privileged \
   -v "${REPO_ROOT}":/code \
-  -v "${CARGO_HOME}":/cargo \
+  -v "${PXE_CARGO_HOME}":/cargo \
   -v "${SCCACHE_HOST}":/sccache \
   -w /code \
   -e CARGO_HOME=/cargo \
   -e SCCACHE_DIR=/sccache \
   -e SA_ENABLEMENT=1 \
   -e PKG_VERSION="${PKG_VERSION}" \
+  -e PXE_BUILD_TASK="${PXE_BUILD_TASK}" \
   -e VERSION="${VERSION}" \
   -e HOST_UID="${HOST_UID}" \
   -e HOST_GID="${HOST_GID}" \
   carbide-pxe-builder \
-  sh -c 'git config --global --add safe.directory /code && git config --global --add safe.directory /code/pxe/ipxe/upstream && r=0; cargo make --cwd pxe --env PKG_VERSION=${PKG_VERSION} --env SA_ENABLEMENT=1 build-boot-artifacts-x86-host-sa || r=$?; chown -R ${HOST_UID}:${HOST_GID} /code 2>/dev/null || true; exit $r'
+  sh -c 'git config --global --add safe.directory /code && git config --global --add safe.directory /code/pxe/ipxe/upstream && r=0; cargo make --cwd pxe --env PKG_VERSION=${PKG_VERSION} --env SA_ENABLEMENT=1 "${PXE_BUILD_TASK}" || r=$?; chown -R ${HOST_UID}:${HOST_GID} /code 2>/dev/null || true; exit $r'
 '''
+
+[tasks.pxe-docker-scout-x86]
+category = "Build"
+description = "Build only the x86_64 Scout UKI and SquashFS in the privileged amd64 PXE builder."
+workspace = false
+env = { "PXE_DOCKER_TASK" = "build-scout-artifacts-x86-host-sa" }
+run_task = "pxe-docker-x86"
 
 [tasks.pxe-native-x86]
 category = "Build"

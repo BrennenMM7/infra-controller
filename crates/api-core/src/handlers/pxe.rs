@@ -47,6 +47,7 @@ pub(crate) async fn get_pxe_instructions(
         interface_id: iface.id,
         arch: pxe_request.arch,
         product: pxe_request.product,
+        scout_customization_enabled: api.runtime_config.scout_customization.is_some(),
     };
     let pxe_script = PxeInstructions::get_pxe_instructions(&mut txn, input).await?;
 

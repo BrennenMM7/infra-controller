@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+services:
+  scout-lab:
+    build:
+      context: ../..
+      dockerfile: dev/scout-customization/Dockerfile
+    container_name: nico-scout-customization-test
+    privileged: true
+    environment:
+      SCOUT_TEST_INTERFACE_ID: ${SCOUT_TEST_INTERFACE_ID:?set by test.sh}
+      SCOUT_TEST_MAC_ADDRESS: ${SCOUT_TEST_MAC_ADDRESS:?set by test.sh}
+      RUST_LOG: ${SCOUT_TEST_RUST_LOG:-info}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ../../pxe/static:/forge-boot-artifacts:ro
+      - ${SCOUT_TEST_CERT_DIR:?set by test.sh}:/certs:ro
+    ports:
+      - "12660:1266"
+      - "18080:18080"
+      - "12222:2222"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/nico-scout-lab-entrypoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s

@@ -27,6 +27,22 @@ attestation_enabled = false
 bypass_rbac = true
 max_concurrent_machine_updates = 20
 
+# Optional packages, files, and units applied to ephemeral Scout before startup.
+# Restart nico-api after changing this section; it applies on the next Scout boot.
+# Do not place credentials or long-lived tokens in file contents unless the
+# site's NoCloud transport is authenticated.
+#
+# [scout_customization]
+# packages = ["site-monitor"]
+# systemd_units = ["site-monitor.service"]
+#
+# [[scout_customization.files]]
+# path = "/etc/site-monitor/config.toml"
+# permissions = "0600"
+# content = """
+# endpoint = "https://monitor.example.com"
+# """
+
 # List all tenant overlays here
 site_fabric_prefixes = ["SITE_FABRIC_PREFIX_1"]
 

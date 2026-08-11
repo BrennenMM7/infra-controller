@@ -189,6 +189,8 @@ pub(super) async fn resolve_cloud_init_instructions(
             }),
             api_url_override: None,
             pxe_url_override: None,
+            scout_cloud_init: None,
+            scout_metadata: None,
         }),
         ResolvedClient::MachineInterface(machine_interface) => {
             let domain_id = machine_interface.domain_id.ok_or_else(|| {
@@ -219,14 +221,38 @@ pub(super) async fn resolve_cloud_init_instructions(
                     None => None,
                 };
 
-            let metadata: Option<rpc::CloudInitMetaData> = machine_interface
-                .machine_id
+            let metadata =
+                machine_interface
+                    .machine_id
+                    .as_ref()
+                    .map(|machine_id| rpc::CloudInitMetaData {
+                        instance_id: machine_id.to_string(),
+                        cloud_name: cloud_name.clone(),
+                        platform: platform.clone(),
+                    });
+
+            // Before ingestion, use the interface ID as Scout's stable seed ID
+            // without changing the legacy DPU metadata contract above.
+            let scout_metadata = Some(rpc::CloudInitMetaData {
+                instance_id: machine_interface
+                    .machine_id
+                    .as_ref()
+                    .map_or_else(|| machine_interface.id.to_string(), ToString::to_string),
+                cloud_name,
+                platform,
+            });
+
+            let scout_cloud_init = api
+                .runtime_config
+                .scout_customization
                 .as_ref()
-                .map(|machine_id| rpc::CloudInitMetaData {
-                    instance_id: machine_id.to_string(),
-                    cloud_name,
-                    platform,
-                });
+                .map(|customization| customization.render_cloud_init())
+                .transpose()
+                .map_err(|error| {
+                    CarbideError::internal(format!(
+                        "failed to render Scout cloud-init configuration: {error}"
+                    ))
+                })?;
 
             // For interfaces on the static-assignments segment, include
             // hostname or IP-based URL overrides so external hosts can
@@ -271,6 +297,8 @@ pub(super) async fn resolve_cloud_init_instructions(
                 metadata,
                 api_url_override,
                 pxe_url_override,
+                scout_cloud_init,
+                scout_metadata,
             })
         }
     }
